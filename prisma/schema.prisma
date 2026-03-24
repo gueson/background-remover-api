@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserProvider {
+  GOOGLE
+  GITHUB
+  EMAIL
+}
+
+enum SubscriptionPlan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  PAST_DUE
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  name          String?
+  avatar        String?
+  provider      UserProvider @default(EMAIL)
+  providerId    String?   // OAuth provider user ID
+  passwordHash  String?   // For email/password auth
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  subscription  Subscription?
+  apiKeys       ApiKey[]
+  usageLogs     UsageLog[]
+
+  @@map("users")
+}
+
+model Subscription {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  plan                  SubscriptionPlan @default(FREE)
+  status                SubscriptionStatus @default(ACTIVE)
+  
+  // PayPal fields
+  paypalSubscriptionId  String?   @unique
+  paypalCustomerId      String?
+  
+  // Billing period
+  currentPeriodStart    DateTime?
+  currentPeriodEnd      DateTime?
+  
+  // Stripe (optional, if you add Stripe later)
+  stripeSubscriptionId  String?   @unique
+  stripePriceId        String?
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@map("subscriptions")
+}
+
+model ApiKey {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  keyHash     String   // Hashed version of the API key
+  keyPrefix   String   // First 8 chars for display
+  name        String?
+  
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@map("api_keys")
+}
+
+model UsageLog {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  imageSize   Int      // bytes
+  resultSize  Int?     // bytes
+  processingTimeMs Int?
+  
+  createdAt   DateTime  @default(now())
+
+  @@map("usage_logs")
+}
