@@ -3,7 +3,8 @@ import { randomBytes } from 'crypto';
 import { createHash } from 'crypto';
 import { prisma } from '../services/db.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { AuthenticatedRequest, BadRequestError, ForbiddenError } from '../middleware/errorHandler.js';
+import { AuthenticatedRequest } from '../types/index.js';
+import { BadRequestError, ForbiddenError } from '../middleware/errorHandler.js';
 
 const router = Router();
 
