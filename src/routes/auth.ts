@@ -11,19 +11,57 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 // Google OAuth Login/Register
 router.post('/google', async (req: Request, res: Response) => {
   try {
-    const { token } = req.body;
-    
-    if (!token) {
-      throw new BadRequestError('Token is required');
+    const { token: idToken, access_token: accessToken, code } = req.body;
+
+    let payload: any;
+
+    if (code) {
+      // Exchange authorization code for tokens
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: process.env.GOOGLE_CLIENT_ID!,
+          client_secret: process.env.GOOGLE_CLIENT_SECRET!,
+          grant_type: 'authorization_code',
+          redirect_uri: `${process.env.FRONTEND_URL}/auth/callback`,
+        }),
+      });
+
+      if (!tokenRes.ok) {
+        const errData = await tokenRes.text();
+        throw new UnauthorizedError(`Token exchange failed: ${errData}`);
+      }
+
+      const tokens = await tokenRes.json();
+      const idTokenFromCode = tokens.id_token;
+
+      const ticket = await googleClient.verifyIdToken({
+        idToken: idTokenFromCode,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } else if (idToken) {
+      // Verify ID token (JWT)
+      const ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } else if (accessToken) {
+      // Verify access token by fetching user info from Google
+      const userInfoRes = await fetch(
+        `https://www.googleapis.com/oauth2/v3/userinfo?access_token=${accessToken}`
+      );
+      if (!userInfoRes.ok) {
+        throw new UnauthorizedError('Invalid Google access token');
+      }
+      payload = await userInfoRes.json();
+    } else {
+      throw new BadRequestError('Token, access_token, or code is required');
     }
-    
-    // Verify Google token
-    const ticket = await googleClient.verifyIdToken({
-      idToken: token,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    
-    const payload = ticket.getPayload();
+
     if (!payload || !payload.email) {
       throw new UnauthorizedError('Invalid Google token');
     }
