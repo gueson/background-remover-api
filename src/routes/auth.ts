@@ -16,7 +16,7 @@ router.post('/google', async (req: Request, res: Response) => {
     let payload: any;
 
     if (code) {
-      // Exchange authorization code for tokens
+      // Exchange authorization code for tokens (with 10s timeout)
       const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -27,6 +27,7 @@ router.post('/google', async (req: Request, res: Response) => {
           grant_type: 'authorization_code',
           redirect_uri: `${process.env.FRONTEND_URL}/auth/callback`,
         }),
+        signal: AbortSignal.timeout(10000),
       });
 
       if (!tokenRes.ok) {
@@ -34,8 +35,8 @@ router.post('/google', async (req: Request, res: Response) => {
         throw new UnauthorizedError(`Token exchange failed: ${errData}`);
       }
 
-      const tokens = await tokenRes.json();
-      const idTokenFromCode = tokens.id_token;
+      const tokens = await tokenRes.json() as { id_token?: string };
+      const idTokenFromCode = tokens.id_token!;
 
       const ticket = await googleClient.verifyIdToken({
         idToken: idTokenFromCode,
@@ -122,9 +123,10 @@ router.post('/google', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Google auth error:', error);
     if (error instanceof BadRequestError || error instanceof UnauthorizedError) {
-      throw error;
+      res.status(error.statusCode).json({ success: false, error: error.message });
+      return;
     }
-    throw new UnauthorizedError('Google authentication failed');
+    res.status(401).json({ success: false, error: 'Google authentication failed' });
   }
 });
 

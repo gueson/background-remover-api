@@ -6,21 +6,14 @@ import { authMiddleware } from '../middleware/auth.js';
 
 const router = Router();
 
-// Initialize PayPal SDK
-const paypal = require('@paypal/checkout-server-sdk');
-const paypalEnvironment = process.env.PAYPAL_MODE === 'live'
-  ? new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID!, process.env.PAYPAL_CLIENT_SECRET!)
-  : new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID!, process.env.PAYPAL_CLIENT_SECRET!);
-const paypalClient = new paypal.core.PayPalHttpClient(paypalEnvironment);
-
-// Get current subscription
+// ─── GET /api/subscription ────────────────────────────────────────────────
 router.get('/', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.id;
-  
+
   const subscription = await prisma.subscription.findUnique({
     where: { userId },
   });
-  
+
   const usageThisMonth = await prisma.usageLog.aggregate({
     where: {
       userId,
@@ -29,18 +22,17 @@ router.get('/', authMiddleware, async (req: AuthenticatedRequest, res: Response)
       },
     },
     _count: true,
-    _sum: { imageSize: true },
   });
-  
+
   const planLimits: Record<string, number | null> = {
     FREE: 10,
-    PRO: null, // unlimited
+    PRO: null,
     ENTERPRISE: null,
   };
-  
+
   const plan = subscription?.plan || 'FREE';
   const monthlyLimit = planLimits[plan];
-  
+
   const subscriptionInfo: SubscriptionInfo = {
     plan,
     status: subscription?.status || 'ACTIVE',
@@ -49,161 +41,138 @@ router.get('/', authMiddleware, async (req: AuthenticatedRequest, res: Response)
     quota: {
       monthly: monthlyLimit,
       used: usageThisMonth._count,
-      remaining: monthlyLimit !== null ? Math.max(0, monthlyLimit - usageThisMonth._count) : null,
+      remaining:
+        monthlyLimit !== null
+          ? Math.max(0, monthlyLimit - usageThisMonth._count)
+          : null,
     },
   };
-  
-  res.json({
-    success: true,
-    data: subscriptionInfo,
-  });
+
+  res.json({ success: true, data: subscriptionInfo });
 });
 
-// Create PayPal Checkout Session
-router.post('/create-checkout', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
-  const { plan } = req.body; // 'PRO' or 'ENTERPRISE'
-  
-  if (!['PRO', 'ENTERPRISE'].includes(plan)) {
-    throw new BadRequestError('Invalid plan. Choose PRO or ENTERPRISE.');
-  }
-  
-  const userId = req.user!.id;
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  
-  if (!user) {
-    throw new NotFoundError('User not found');
-  }
-  
-  const prices: Record<string, string> = {
-    PRO: '9.00',
-    ENTERPRISE: '29.00',
-  };
-  
-  const request = new paypal.orders.OrdersCreateRequest();
-  request.prefer('return=representation');
-  request.requestBody({
-    intent: 'CAPTURE',
-    customer: {
-      purchase_unit: {
-        reference_id: userId,
-        amount: {
-          currency_code: 'USD',
-          value: prices[plan],
-        },
-        custom_id: JSON.stringify({ userId, plan }),
-      },
-    },
-    checkout_setup: {
-      flow_config: {
-        bank_txn_pending_url: `${process.env.FRONTEND_URL}/subscription/pending`,
-      },
-    },
-  });
-  
-  try {
-    const order = await paypalClient.execute(request);
-    
-    // Find approval URL
-    const approvalLink = order.result.links.find(
-      (link: any) => link.rel === 'approve'
-    );
-    
-    res.json({
-      success: true,
-      data: {
-        orderId: order.result.id,
-        approvalUrl: approvalLink?.href,
-      },
-    });
-  } catch (error: any) {
-    console.error('PayPal error:', error);
-    throw new BadRequestError('Failed to create PayPal order. Please try again.');
-  }
-});
-
-// Capture PayPal Order (after user approves)
-router.post('/capture', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
-  const { orderId } = req.body;
-  
-  if (!orderId) {
-    throw new BadRequestError('Order ID is required');
-  }
-  
-  const request = new paypal.orders.OrdersCaptureRequest(orderId);
-  request.requestBody({});
-  
-  try {
-    const capture = await paypalClient.execute(request);
-    
-    if (capture.result.status === 'COMPLETED') {
-      const customData = JSON.parse(
-        capture.result.purchase_units[0].custom_id || '{}'
-      );
-      
-      // Update subscription
-      await prisma.subscription.upsert({
-        where: { userId: customData.userId },
-        update: {
-          plan: customData.plan,
-          status: 'ACTIVE',
-          paypalSubscriptionId: orderId,
-          currentPeriodStart: new Date(),
-          currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
-        },
-        create: {
-          userId: customData.userId,
-          plan: customData.plan,
-          status: 'ACTIVE',
-          paypalSubscriptionId: orderId,
-          currentPeriodStart: new Date(),
-          currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        },
-      });
-      
-      res.json({
-        success: true,
-        message: 'Subscription activated successfully',
-      });
-    } else {
-      throw new BadRequestError('Payment not completed');
-    }
-  } catch (error: any) {
-    console.error('PayPal capture error:', error);
-    throw new BadRequestError('Failed to capture payment');
-  }
-});
-
-// Cancel subscription
+// ─── POST /api/subscription/cancel ──────────────────────────────────────
 router.post('/cancel', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.id;
-  
+
   await prisma.subscription.update({
     where: { userId },
     data: { status: 'CANCELLED' },
   });
-  
-  res.json({
-    success: true,
-    message: 'Subscription cancelled',
-  });
+
+  res.json({ success: true, message: 'Subscription cancelled' });
 });
 
-// Webhook for PayPal events
+// ─── POST /api/subscription/webhook ─────────────────────────────────────
+// PayPal sends webhook events here (no auth – verified by PayPal signature)
 router.post('/webhook', async (req: Request, res: Response) => {
-  const webhookEvent = req.body;
-  
-  // In production, verify webhook signature
-  console.log('PayPal webhook:', webhookEvent.event_type);
-  
-  if (webhookEvent.event_type === 'BILLING.SUBSCRIPTION.CANCELLED') {
-    const subscriptionId = webhookEvent.resource.id;
-    
-    await prisma.subscription.updateMany({
-      where: { paypalSubscriptionId: subscriptionId },
-      data: { status: 'CANCELLED' },
-    });
+  const event = req.body;
+  const webhookEvent = event.event_type as string;
+  const resource = event.resource as Record<string, any>;
+
+  console.log(`[PayPal Webhook] ${webhookEvent}:`, JSON.stringify(resource).slice(0, 200));
+
+  try {
+    switch (webhookEvent) {
+      case 'BILLING.SUBSCRIPTION.CREATED': {
+        // New subscription created – store the PayPal subscription ID
+        const paypalSubId = resource.id as string;
+        const userEmail = resource.subscriber?.email_address as string | undefined;
+        const planId = resource.plan_id as string;
+
+        // Map PayPal plan_id to our plan enum
+        const plan = planId?.includes('ENTERPRISE') ? 'ENTERPRISE' : 'PRO';
+
+        if (userEmail) {
+          const user = await prisma.user.findUnique({ where: { email: userEmail } });
+          if (user) {
+            await prisma.subscription.upsert({
+              where: { userId: user.id },
+              update: {
+                paypalSubscriptionId: paypalSubId,
+                plan,
+                status: 'ACTIVE',
+              },
+              create: {
+                userId: user.id,
+                paypalSubscriptionId: paypalSubId,
+                plan,
+                status: 'ACTIVE',
+                currentPeriodStart: new Date(),
+                currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              },
+            });
+          }
+        }
+        break;
+      }
+
+      case 'BILLING.SUBSCRIPTION.ACTIVATED':
+      case 'BILLING.SUBSCRIPTION.REACTIVATED': {
+        const paypalSubId = resource.id as string;
+        const startTime = resource.start_time ? new Date(resource.start_time) : new Date();
+        const nextBillingTime = resource.billing_info?.next_billing_time
+          ? new Date(resource.billing_info.next_billing_time)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+        await prisma.subscription.updateMany({
+          where: { paypalSubscriptionId: paypalSubId },
+          data: {
+            status: 'ACTIVE',
+            currentPeriodStart: startTime,
+            currentPeriodEnd: nextBillingTime,
+          },
+        });
+        console.log(`[PayPal Webhook] Subscription ${paypalSubId} activated`);
+        break;
+      }
+
+      case 'BILLING.SUBSCRIPTION.CANCELLED':
+      case 'BILLING.SUBSCRIPTION.EXPIRED': {
+        const paypalSubId = resource.id as string;
+        await prisma.subscription.updateMany({
+          where: { paypalSubscriptionId: paypalSubId },
+          data: { status: webhookEvent === 'BILLING.SUBSCRIPTION.CANCELLED' ? 'CANCELLED' : 'EXPIRED' },
+        });
+        console.log(`[PayPal Webhook] Subscription ${paypalSubId} ${webhookEvent.split('.')[2].toLowerCase()}`);
+        break;
+      }
+
+      case 'BILLING.SUBSCRIPTION.SUSPENDED': {
+        const paypalSubId = resource.id as string;
+        await prisma.subscription.updateMany({
+          where: { paypalSubscriptionId: paypalSubId },
+          data: { status: 'PAST_DUE' },
+        });
+        break;
+      }
+
+      case 'PAYMENT.SALE.COMPLETED': {
+        // Payment received – extend the period
+        const paypalSubId = resource.billing_agreement_id as string;
+        const amount = resource.amount?.total as string;
+        const nextBillingTime = resource.billing_info?.next_payment_time
+          ? new Date(resource.billing_info.next_payment_time)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+        if (paypalSubId) {
+          await prisma.subscription.updateMany({
+            where: { paypalSubscriptionId: paypalSubId },
+            data: { currentPeriodEnd: nextBillingTime },
+          });
+        }
+        console.log(`[PayPal Webhook] Payment ${amount} received for ${paypalSubId}`);
+        break;
+      }
+
+      default:
+        console.log(`[PayPal Webhook] Unhandled event: ${webhookEvent}`);
+    }
+  } catch (err) {
+    console.error('[PayPal Webhook] Error processing event:', err);
+    // Still return 200 so PayPal doesn't retry
   }
-  
+
   res.json({ received: true });
 });
 
