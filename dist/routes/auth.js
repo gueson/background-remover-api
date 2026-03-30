@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.verifySupabaseToken = verifySupabaseToken;
 const express_1 = require("express");
 const google_auth_library_1 = require("google-auth-library");
 const db_js_1 = require("../services/db.js");
@@ -190,7 +191,7 @@ router.post('/supabase-exchange', async (req, res) => {
         }
         // Verify Supabase token by fetching user info
         const supabaseUrl = process.env.SUPABASE_URL;
-        const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+        const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
         if (!supabaseUrl || !supabaseKey) {
             throw new Error('Supabase not configured on backend');
         }
@@ -268,5 +269,40 @@ router.post('/supabase-exchange', async (req, res) => {
         res.status(401).json({ success: false, error: 'Supabase token exchange failed' });
     }
 });
+// Verify Supabase token and return user info
+// Used by backend middleware to authenticate Supabase tokens
+async function verifySupabaseToken(accessToken) {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+        console.error('Supabase not configured');
+        return null;
+    }
+    try {
+        const userRes = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'apikey': supabaseKey,
+            },
+        });
+        if (!userRes.ok) {
+            return null;
+        }
+        const supabaseUser = await userRes.json();
+        if (!supabaseUser?.email) {
+            return null;
+        }
+        return {
+            id: supabaseUser.id,
+            email: supabaseUser.email,
+            name: supabaseUser.user_metadata?.full_name || supabaseUser.user_metadata?.name || undefined,
+            avatar: supabaseUser.user_metadata?.avatar_url || undefined,
+        };
+    }
+    catch (error) {
+        console.error('Failed to verify Supabase token:', error);
+        return null;
+    }
+}
 exports.default = router;
 //# sourceMappingURL=auth.js.map

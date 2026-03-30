@@ -211,7 +211,7 @@ router.post('/supabase-exchange', async (req: Request, res: Response) => {
     
     // Verify Supabase token by fetching user info
     const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
     
     if (!supabaseUrl || !supabaseKey) {
       throw new Error('Supabase not configured on backend');
@@ -305,5 +305,59 @@ router.post('/supabase-exchange', async (req: Request, res: Response) => {
     res.status(401).json({ success: false, error: 'Supabase token exchange failed' });
   }
 });
+
+// Verify Supabase token and return user info
+// Used by backend middleware to authenticate Supabase tokens
+export async function verifySupabaseToken(accessToken: string): Promise<{
+  id: string;
+  email: string;
+  name?: string;
+  avatar?: string;
+} | null> {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+  
+  if (!supabaseUrl || !supabaseKey) {
+    console.error('Supabase not configured');
+    return null;
+  }
+  
+  try {
+    const userRes = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'apikey': supabaseKey,
+      },
+    });
+    
+    if (!userRes.ok) {
+      return null;
+    }
+    
+    const supabaseUser = await userRes.json() as {
+      id: string;
+      email?: string;
+      user_metadata?: {
+        full_name?: string;
+        name?: string;
+        avatar_url?: string;
+      };
+    };
+    
+    if (!supabaseUser?.email) {
+      return null;
+    }
+    
+    return {
+      id: supabaseUser.id,
+      email: supabaseUser.email,
+      name: supabaseUser.user_metadata?.full_name || supabaseUser.user_metadata?.name || undefined,
+      avatar: supabaseUser.user_metadata?.avatar_url || undefined,
+    };
+  } catch (error) {
+    console.error('Failed to verify Supabase token:', error);
+    return null;
+  }
+}
 
 export default router;
