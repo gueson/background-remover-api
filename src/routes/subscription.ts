@@ -63,6 +63,43 @@ router.post('/cancel', authMiddleware, async (req: AuthenticatedRequest, res: Re
   res.json({ success: true, message: 'Subscription cancelled' });
 });
 
+// ─── POST /api/subscription/confirm ──────────────────────────────────────
+// Called by frontend after PayPal approval redirect — activates PRO immediately
+router.post('/confirm', async (req: Request, res: Response) => {
+  const { paypalSubscriptionId } = req.body as { paypalSubscriptionId?: string };
+
+  if (!paypalSubscriptionId) {
+    res.status(400).json({ error: 'paypalSubscriptionId is required' });
+    return;
+  }
+
+  try {
+    // Verify subscription exists in our DB (was created during create-subscription)
+    const existing = await prisma.subscription.findUnique({
+      where: { paypalSubscriptionId },
+    });
+
+    if (existing) {
+      await prisma.subscription.update({
+        where: { userId: existing.userId },
+        data: {
+          plan: 'PRO',
+          status: 'ACTIVE',
+        },
+      });
+      console.log(`[Confirm] PRO activated for subscription ${paypalSubscriptionId}, user ${existing.userId}`);
+      res.json({ success: true, plan: 'PRO' });
+    } else {
+      // Subscription not found — user might not be in our DB yet
+      // Try to find by userId from auth header as fallback
+      res.status(404).json({ error: 'Subscription not found. Webhook will activate later.' });
+    }
+  } catch (err) {
+    console.error('[Confirm] Error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ─── POST /api/subscription/webhook ─────────────────────────────────────
 // PayPal sends webhook events here (no auth – verified by PayPal signature)
 router.post('/webhook', async (req: Request, res: Response) => {
@@ -156,16 +193,41 @@ router.post('/webhook', async (req: Request, res: Response) => {
           : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
         if (paypalSubId) {
-          await prisma.subscription.updateMany({
+          const existing = await prisma.subscription.findUnique({
             where: { paypalSubscriptionId: paypalSubId },
-            data: {
-              plan: 'PRO',
-              status: 'ACTIVE',
-              currentPeriodEnd: nextBillingTime,
-            },
           });
+
+          if (existing) {
+            await prisma.subscription.update({
+              where: { paypalSubscriptionId: paypalSubId },
+              data: {
+                plan: 'PRO',
+                status: 'ACTIVE',
+                currentPeriodEnd: nextBillingTime,
+              },
+            });
+            console.log(`[PayPal Webhook] PRO activated for ${paypalSubId}, user ${existing.userId}`);
+          } else {
+            // Fallback: try to find user by email and create subscription record
+            const userEmail = resource.subscriber?.email_address as string | undefined;
+            if (userEmail) {
+              const user = await prisma.user.findUnique({ where: { email: userEmail } });
+              if (user) {
+                await prisma.subscription.create({
+                  data: {
+                    userId: user.id,
+                    paypalSubscriptionId: paypalSubId,
+                    plan: 'PRO',
+                    status: 'ACTIVE',
+                    currentPeriodStart: new Date(),
+                    currentPeriodEnd: nextBillingTime,
+                  },
+                });
+                console.log(`[PayPal Webhook] PRO activated (fallback via email) for ${paypalSubId}, user ${user.id}`);
+              }
+            }
+          }
         }
-        console.log(`[PayPal Webhook] PRO activated for ${paypalSubId}`);
         break;
       }
 
