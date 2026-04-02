@@ -4,15 +4,15 @@ import { verifyToken } from '../services/jwt.js';
 import { AuthenticatedRequest } from '../types/index.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 async function validateSupabaseToken(token: string): Promise<{ userId: string; email: string } | null> {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
   try {
     const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: {
         Authorization: `Bearer ${token}`,
-        apikey: SUPABASE_ANON_KEY,
+        apikey: SUPABASE_SERVICE_KEY,
       },
     });
     if (!res.ok) return null;
