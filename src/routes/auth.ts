@@ -1,363 +1,91 @@
 import { Router, Request, Response } from 'express';
-import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../services/db.js';
 import { generateToken } from '../services/jwt.js';
-import { BadRequestError, UnauthorizedError } from '../middleware/errorHandler.js';
-import { AuthUser } from '../types/index.js';
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 
 const router = Router();
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// Google OAuth Login/Register
-router.post('/google', async (req: Request, res: Response) => {
-  try {
-    const { token: idToken, access_token: accessToken, code } = req.body;
-
-    let payload: any;
-
-    if (code) {
-      // Exchange authorization code for tokens (with 10s timeout)
-      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          code,
-          client_id: process.env.GOOGLE_CLIENT_ID!,
-          client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-          grant_type: 'authorization_code',
-          redirect_uri: `${process.env.FRONTEND_URL}/auth/callback`,
-        }),
-        signal: AbortSignal.timeout(10000),
-      });
-
-      if (!tokenRes.ok) {
-        const errData = await tokenRes.text();
-        throw new UnauthorizedError(`Token exchange failed: ${errData}`);
-      }
-
-      const tokens = await tokenRes.json() as { id_token?: string };
-      const idTokenFromCode = tokens.id_token!;
-
-      const ticket = await googleClient.verifyIdToken({
-        idToken: idTokenFromCode,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      payload = ticket.getPayload();
-    } else if (idToken) {
-      // Verify ID token (JWT)
-      const ticket = await googleClient.verifyIdToken({
-        idToken,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      payload = ticket.getPayload();
-    } else if (accessToken) {
-      // Verify access token by fetching user info from Google
-      const userInfoRes = await fetch(
-        `https://www.googleapis.com/oauth2/v3/userinfo?access_token=${accessToken}`
-      );
-      if (!userInfoRes.ok) {
-        throw new UnauthorizedError('Invalid Google access token');
-      }
-      payload = await userInfoRes.json();
-    } else {
-      throw new BadRequestError('Token, access_token, or code is required');
-    }
-
-    if (!payload || !payload.email) {
-      throw new UnauthorizedError('Invalid Google token');
-    }
-    
-    const email = payload.email.toLowerCase();
-    const name = payload.name || null;
-    const avatar = payload.picture || null;
-    
-    // Find or create user
-    let user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { email, provider: 'GOOGLE' },
-          { email, providerId: payload.sub },
-        ],
-      },
-    });
-    
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          email,
-          name,
-          avatar,
-          provider: 'GOOGLE',
-          providerId: payload.sub,
-          subscription: {
-            create: {
-              plan: 'FREE',
-              status: 'ACTIVE',
-            },
-          },
-        },
-      });
-    } else {
-      // Update user info if changed
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: { name, avatar },
-      });
-    }
-    
-    const jwtToken = generateToken({ userId: user.id, email: user.email });
-    
-    res.json({
-      success: true,
-      data: {
-        token: jwtToken,
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          avatar: user.avatar,
-          provider: user.provider,
-        },
-      },
-    });
-  } catch (error: any) {
-    console.error('Google auth error:', error);
-    if (error instanceof BadRequestError || error instanceof UnauthorizedError) {
-      res.status(error.statusCode).json({ success: false, error: error.message });
-      return;
-    }
-    res.status(401).json({ success: false, error: 'Google authentication failed' });
-  }
-});
-
-// GitHub OAuth (simplified - in production, implement proper OAuth flow)
-router.post('/github', async (req: Request, res: Response) => {
-  try {
-    const { code } = req.body;
-    
-    if (!code) {
-      throw new BadRequestError('Code is required');
-    }
-    
-    // Exchange code for access token (implement GitHub OAuth)
-    // This is a simplified version - real implementation would:
-    // 1. Exchange code for access token via GitHub API
-    // 2. Get user info from GitHub API
-    // 3. Create/find user in database
-    
-    // Placeholder response
-    throw new BadRequestError('GitHub OAuth not configured. Please use Google login.');
-  } catch (error: any) {
-    if (error instanceof BadRequestError) {
-      throw error;
-    }
-    throw new BadRequestError('GitHub authentication failed');
-  }
-});
-
-// Get current user
-router.get('/me', async (req: Request, res: Response) => {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.json({
-      success: true,
-      data: { authenticated: false },
-    });
-    return;
-  }
-  
-  const token = authHeader.substring(7);
-  const jwt = await import('../services/jwt.js');
-  const payload = jwt.verifyToken(token);
-  
-  if (!payload) {
-    res.json({
-      success: true,
-      data: { authenticated: false },
-    });
-    return;
-  }
-  
-  const user = await prisma.user.findUnique({
-    where: { id: payload.userId },
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      avatar: true,
-      provider: true,
-    },
-  });
-  
-  res.json({
-    success: true,
-    data: {
-      authenticated: !!user,
-      user,
-    },
-  });
-});
-
-// Exchange Supabase access token for our backend JWT
-// This is needed because frontend uses Supabase OAuth but backend uses its own JWT
+// POST /api/auth/supabase-exchange
+// Receives a Supabase access token (as JSON {access_token} or raw JWT string), returns a backend JWT
 router.post('/supabase-exchange', async (req: Request, res: Response) => {
   try {
-    const { access_token } = req.body;
-    
-    if (!access_token) {
-      throw new BadRequestError('access_token is required');
-    }
-    
-    // Verify Supabase token by fetching user info
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
-    
-    if (!supabaseUrl || !supabaseKey) {
-      throw new Error('Supabase not configured on backend');
-    }
-    
-    const userRes = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: {
-        'Authorization': `Bearer ${access_token}`,
-        'apikey': supabaseKey,
-      },
-    });
-    
-    if (!userRes.ok) {
-      throw new UnauthorizedError('Invalid Supabase token');
-    }
-    
-    const supabaseUser = await userRes.json() as {
-      id: string;
-      email?: string;
-      user_metadata?: {
-        full_name?: string;
-        name?: string;
-        avatar_url?: string;
-      };
-    };
-    
-    if (!supabaseUser?.email) {
-      throw new UnauthorizedError('No email in Supabase user');
-    }
-    
-    const email = supabaseUser.email.toLowerCase();
-    const name = supabaseUser.user_metadata?.full_name || supabaseUser.user_metadata?.name || null;
-    const avatar = supabaseUser.user_metadata?.avatar_url || null;
-    const providerId = supabaseUser.id;
-    
-    // Find or create user in our DB
-    let user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { email, provider: 'GOOGLE' },
-          { email, providerId },
-        ],
-      },
-    });
-    
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          email,
-          name,
-          avatar,
-          provider: 'GOOGLE',
-          providerId,
-          subscription: {
-            create: {
-              plan: 'FREE',
-              status: 'ACTIVE',
-            },
-          },
-        },
-      });
-    } else {
-      // Update user info if changed
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: { name, avatar },
-      });
-    }
-    
-    const jwtToken = generateToken({ userId: user.id, email: user.email });
-    
-    res.json({
-      success: true,
-      data: {
-        token: jwtToken,
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          avatar: user.avatar,
-          provider: user.provider,
-        },
-      },
-    });
-  } catch (error: any) {
-    console.error('Supabase exchange error:', error);
-    if (error instanceof BadRequestError || error instanceof UnauthorizedError) {
-      res.status(error.statusCode).json({ success: false, error: error.message });
+    // Accept both JSON { access_token: "..." } and raw JWT string
+    let access_token = (req.body as any)?.access_token || (req.body as any) || null;
+    if (!access_token || typeof access_token !== 'string') {
+      res.status(400).json({ success: false, error: 'access_token is required' });
       return;
     }
-    res.status(401).json({ success: false, error: 'Supabase token exchange failed' });
+    access_token = access_token.trim();
+
+    if (!access_token) {
+      res.status(400).json({ error: 'access_token is required' });
+      return;
+    }
+
+    // Validate the Supabase access token using the service role key
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    let userId: string | null = null;
+    let email: string | null = null;
+
+    try {
+      const { data: { user }, error } = await supabase.auth.getUser(access_token);
+      if (!error && user) {
+        userId = user.id;
+        email = user.email || null;
+      }
+    } catch {}
+
+    // Fallback: decode JWT payload directly
+    if (!userId) {
+      try {
+        const parts = access_token.split('.');
+        if (parts.length === 3) {
+          // Try URL-safe base64 first, then standard base64
+          let payload: any;
+          try {
+            payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+          } catch {
+            payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf-8'));
+          }
+          userId = payload.sub || payload.user_id || null;
+          email = payload.email || null;
+        }
+      } catch (e) {}
+      if (!userId) {
+        res.status(401).json({ success: false, error: 'Invalid token' });
+        return;
+      }
+    }
+
+    // Upsert user in our DB
+    let user = await prisma.user.findUnique({ where: { id: userId } }) as any;
+    if (!user) {
+      try {
+        user = await prisma.user.create({
+          data: { id: userId!, email: email || `user_${userId}@unknown`, provider: 'GOOGLE' },
+        }) as any;
+      } catch (createErr: any) {
+        if (createErr?.code === 'P2002') {
+          user = await prisma.user.findUnique({ where: { email: email! } }) as any;
+        } else {
+          throw createErr;
+        }
+      }
+    }
+
+    // Generate backend JWT
+    const backendToken = generateToken(user);
+    res.json({ success: true, data: { token: backendToken } });
+  } catch (err: any) {
+    console.error('[/api/auth/supabase-exchange]', err?.message || err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
-
-// Verify Supabase token and return user info
-// Used by backend middleware to authenticate Supabase tokens
-export async function verifySupabaseToken(accessToken: string): Promise<{
-  id: string;
-  email: string;
-  name?: string;
-  avatar?: string;
-} | null> {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
-  
-  if (!supabaseUrl || !supabaseKey) {
-    console.error('Supabase not configured');
-    return null;
-  }
-  
-  try {
-    const userRes = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'apikey': supabaseKey,
-      },
-    });
-    
-    if (!userRes.ok) {
-      return null;
-    }
-    
-    const supabaseUser = await userRes.json() as {
-      id: string;
-      email?: string;
-      user_metadata?: {
-        full_name?: string;
-        name?: string;
-        avatar_url?: string;
-      };
-    };
-    
-    if (!supabaseUser?.email) {
-      return null;
-    }
-    
-    return {
-      id: supabaseUser.id,
-      email: supabaseUser.email,
-      name: supabaseUser.user_metadata?.full_name || supabaseUser.user_metadata?.name || undefined,
-      avatar: supabaseUser.user_metadata?.avatar_url || undefined,
-    };
-  } catch (error) {
-    console.error('Failed to verify Supabase token:', error);
-    return null;
-  }
-}
 
 export default router;

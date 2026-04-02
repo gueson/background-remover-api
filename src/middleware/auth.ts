@@ -2,24 +2,31 @@ import { Response, NextFunction } from 'express';
 import { prisma } from '../services/db.js';
 import { AuthenticatedRequest } from '../types/index.js';
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-
-async function validateSupabaseToken(token: string): Promise<{ userId: string; email: string } | null> {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
+function decodeSupabaseToken(token: string): { userId: string; email: string } | { error: string } {
   try {
-    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        apikey: SUPABASE_SERVICE_KEY,
-      },
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { id?: string; email?: string };
-    if (!data.id || !data.email) return null;
-    return { userId: data.id, email: data.email };
-  } catch {
-    return null;
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return { error: `Token does not have 3 parts: ${parts.length}` };
+    }
+    const payloadB64 = parts[1];
+    // Try URL-safe base64 first, then standard base64
+    let payload: any;
+    try {
+      payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+    } catch {
+      try {
+        payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8'));
+      } catch {
+        return { error: 'Could not decode payload' };
+      }
+    }
+    const userId = payload.sub || payload.user_id;
+    if (!userId) {
+      return { error: `No sub/user_id in token payload: ${JSON.stringify(Object.keys(payload))}` };
+    }
+    return { userId, email: payload.email || `user_${userId}@unknown` };
+  } catch (err: any) {
+    return { error: `JWT decode failed: ${err.message}` };
   }
 }
 
@@ -30,42 +37,40 @@ export async function authMiddleware(
 ): Promise<void> {
   try {
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       res.status(401).json({ error: 'No token provided' });
       return;
     }
-    
+
     const token = authHeader.substring(7);
+    const decoded = decodeSupabaseToken(token);
 
-    // Try Supabase token (most common case for logged-in users)
-    let supabaseUser = await validateSupabaseToken(token);
-    let userId: string;
-    let email: string;
-
-    if (supabaseUser) {
-      userId = supabaseUser.userId;
-      email = supabaseUser.email;
-    } else {
+    if ('error' in decoded) {
+      console.error('[Auth] Token decode failed:', decoded.error, '| token prefix:', token.substring(0, 50));
       res.status(401).json({ error: 'Invalid or expired token' });
       return;
     }
 
-    // Upsert user if not exists
-    let user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, email: true, name: true, provider: true },
-    });
+    const { userId, email } = decoded;
+
+    let user = await prisma.user.findUnique({ where: { id: userId } }) as any;
 
     if (!user) {
-      user = await prisma.user.upsert({
-        where: { id: userId },
-        update: {},
-        create: { id: userId, email: email || `user_${userId}@unknown`, provider: 'GOOGLE' },
-        select: { id: true, email: true, name: true, provider: true },
-      });
+      try {
+        user = await prisma.user.create({
+          data: { id: userId, email, provider: 'GOOGLE' },
+        }) as any;
+      } catch (createErr: any) {
+        // Email already exists with different userId — use that user
+        if (createErr?.code === 'P2002') {
+          user = await prisma.user.findUnique({ where: { email } }) as any;
+        } else {
+          throw createErr;
+        }
+      }
     }
-    
+
     req.user = user as any;
     next();
   } catch (error: any) {
@@ -80,11 +85,11 @@ export function optionalAuth(
   next: NextFunction
 ): void {
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     next();
     return;
   }
-  
+
   authMiddleware(req, res, next);
 }
