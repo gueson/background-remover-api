@@ -2,7 +2,27 @@ import { Response, NextFunction } from 'express';
 import { prisma } from '../services/db.js';
 import { verifyToken } from '../services/jwt.js';
 import { AuthenticatedRequest } from '../types/index.js';
-import { verifySupabaseToken } from '../routes/auth.js';
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+
+async function validateSupabaseToken(token: string): Promise<{ userId: string; email: string } | null> {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: SUPABASE_ANON_KEY,
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { id?: string; email?: string };
+    if (!data.id || !data.email) return null;
+    return { userId: data.id, email: data.email };
+  } catch {
+    return null;
+  }
+}
 
 export async function authMiddleware(
   req: AuthenticatedRequest,
@@ -18,79 +38,39 @@ export async function authMiddleware(
     }
     
     const token = authHeader.substring(7);
-    
-    // Try our own JWT first
+
+    // Try backend JWT first
     let payload = verifyToken(token);
+    let userId: string;
     
     if (!payload) {
-      // If our JWT fails, try verifying as Supabase token
-      const supabaseUser = await verifySupabaseToken(token);
+      // Try Supabase token
+      const supabaseUser = await validateSupabaseToken(token);
       if (!supabaseUser) {
         res.status(401).json({ error: 'Invalid or expired token' });
         return;
       }
-      
-      // Find or create user in our DB based on Supabase user
-      let user = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { email: supabaseUser.email.toLowerCase(), provider: 'GOOGLE' },
-            { email: supabaseUser.email.toLowerCase(), providerId: supabaseUser.id },
-          ],
-        },
-      });
-      
-      if (!user) {
-        user = await prisma.user.create({
-          data: {
-            email: supabaseUser.email.toLowerCase(),
-            name: supabaseUser.name || null,
-            avatar: supabaseUser.avatar || null,
-            provider: 'GOOGLE',
-            providerId: supabaseUser.id,
-            subscription: {
-              create: {
-                plan: 'FREE',
-                status: 'ACTIVE',
-              },
-            },
-          },
-        });
-      } else {
-        // Update user info if changed
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data: { 
-            name: supabaseUser.name || user.name,
-            avatar: supabaseUser.avatar || user.avatar,
-          },
-        });
-      }
-      
-      req.user = {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        provider: user.provider,
-      };
-      next();
-      return;
+      userId = supabaseUser.userId;
+    } else {
+      userId = payload.userId;
     }
-    
-    // Our own JWT succeeded - fetch full user from DB
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        provider: true,
-      },
+
+    // Upsert user if not exists
+    let user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true, provider: true },
     });
-    
+
     if (!user) {
-      res.status(401).json({ error: 'User not found' });
-      return;
+      // Try to get email from Supabase if we have the token
+      const supabaseUser = await validateSupabaseToken(token);
+      const email = supabaseUser?.email || `user_${userId}@unknown`;
+      user = await prisma.user.upsert({
+        where: { id: userId },
+        update: {},
+        create: { id: userId, email, provider: 'GOOGLE' },
+        select: { id: true, email: true, name: true, provider: true },
+      });
     }
     
     req.user = user as any;
