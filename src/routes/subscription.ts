@@ -147,10 +147,10 @@ router.post('/webhook', async (req: Request, res: Response) => {
         break;
       }
 
-      case 'PAYMENT.SALE.COMPLETED': {
-        // Payment received – extend the period
-        const paypalSubId = resource.billing_agreement_id as string;
-        const amount = resource.amount?.total as string;
+      case 'PAYMENT.SALE.COMPLETED':
+      case 'BILLING.SUBSCRIPTION.RECURRING_PAYMENT.RELEASED': {
+        // Payment received (first or recurring) → activate PRO and extend period
+        const paypalSubId = (resource.billing_agreement_id || resource.id) as string;
         const nextBillingTime = resource.billing_info?.next_payment_time
           ? new Date(resource.billing_info.next_payment_time)
           : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -158,10 +158,14 @@ router.post('/webhook', async (req: Request, res: Response) => {
         if (paypalSubId) {
           await prisma.subscription.updateMany({
             where: { paypalSubscriptionId: paypalSubId },
-            data: { currentPeriodEnd: nextBillingTime },
+            data: {
+              plan: 'PRO',
+              status: 'ACTIVE',
+              currentPeriodEnd: nextBillingTime,
+            },
           });
         }
-        console.log(`[PayPal Webhook] Payment ${amount} received for ${paypalSubId}`);
+        console.log(`[PayPal Webhook] PRO activated for ${paypalSubId}`);
         break;
       }
 
