@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../services/db.js';
 import { generateToken } from '../services/jwt.js';
-import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
@@ -9,7 +8,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 const router = Router();
 
 // POST /api/auth/supabase-exchange
-// Receives a Supabase access token (as JSON {access_token} or raw JWT string), returns a backend JWT
+// Receives a Supabase access token, returns a backend JWT
 router.post('/supabase-exchange', async (req: Request, res: Response) => {
   try {
     // Accept both JSON { access_token: "..." } and raw JWT string
@@ -20,20 +19,15 @@ router.post('/supabase-exchange', async (req: Request, res: Response) => {
     }
     access_token = access_token.trim();
 
-    if (!access_token) {
-      res.status(400).json({ error: 'access_token is required' });
-      return;
-    }
-
-    // Validate the Supabase access token using the service role key
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-
     let userId: string | null = null;
     let email: string | null = null;
 
+    // Validate the Supabase access token using the service role key
     try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
       const { data: { user }, error } = await supabase.auth.getUser(access_token);
       if (!error && user) {
         userId = user.id;
@@ -46,7 +40,6 @@ router.post('/supabase-exchange', async (req: Request, res: Response) => {
       try {
         const parts = access_token.split('.');
         if (parts.length === 3) {
-          // Try URL-safe base64 first, then standard base64
           let payload: any;
           try {
             payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
@@ -56,7 +49,7 @@ router.post('/supabase-exchange', async (req: Request, res: Response) => {
           userId = payload.sub || payload.user_id || null;
           email = payload.email || null;
         }
-      } catch (e) {}
+      } catch {}
       if (!userId) {
         res.status(401).json({ success: false, error: 'Invalid token' });
         return;
