@@ -1,6 +1,5 @@
 import { Response, NextFunction } from 'express';
 import { prisma } from '../services/db.js';
-import { verifyToken } from '../services/jwt.js';
 import { AuthenticatedRequest } from '../types/index.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -39,20 +38,17 @@ export async function authMiddleware(
     
     const token = authHeader.substring(7);
 
-    // Try backend JWT first
-    let payload = verifyToken(token);
+    // Try Supabase token (most common case for logged-in users)
+    let supabaseUser = await validateSupabaseToken(token);
     let userId: string;
-    
-    if (!payload) {
-      // Try Supabase token
-      const supabaseUser = await validateSupabaseToken(token);
-      if (!supabaseUser) {
-        res.status(401).json({ error: 'Invalid or expired token' });
-        return;
-      }
+    let email: string;
+
+    if (supabaseUser) {
       userId = supabaseUser.userId;
+      email = supabaseUser.email;
     } else {
-      userId = payload.userId;
+      res.status(401).json({ error: 'Invalid or expired token' });
+      return;
     }
 
     // Upsert user if not exists
@@ -62,20 +58,18 @@ export async function authMiddleware(
     });
 
     if (!user) {
-      // Try to get email from Supabase if we have the token
-      const supabaseUser = await validateSupabaseToken(token);
-      const email = supabaseUser?.email || `user_${userId}@unknown`;
       user = await prisma.user.upsert({
         where: { id: userId },
         update: {},
-        create: { id: userId, email, provider: 'GOOGLE' },
+        create: { id: userId, email: email || `user_${userId}@unknown`, provider: 'GOOGLE' },
         select: { id: true, email: true, name: true, provider: true },
       });
     }
     
     req.user = user as any;
     next();
-  } catch (error) {
+  } catch (error: any) {
+    console.error('[Auth Middleware Error]:', error?.message || error);
     res.status(401).json({ error: 'Authentication failed' });
   }
 }
