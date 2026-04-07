@@ -3,9 +3,9 @@ import sharp from 'sharp';
 
 const BG_SERVICE_URL = process.env.BG_SERVICE_URL || 'http://localhost:8000';
 
-// Compress image if over 2MB or larger than 2000px on longest side
-const SIZE_THRESHOLD = 2 * 1024 * 1024; // 2MB
-const MAX_DIMENSION = 2000; // px
+// Compress image if over 1MB or larger than 1500px on longest side
+const SIZE_THRESHOLD = 1 * 1024 * 1024; // 1MB
+const MAX_DIMENSION = 1500; // px
 
 async function compressImage(buffer: Buffer): Promise<Buffer> {
   const metadata = await sharp(buffer).metadata();
@@ -17,6 +17,8 @@ async function compressImage(buffer: Buffer): Promise<Buffer> {
   }
 
   let pipeline = sharp(buffer);
+
+  // Resize if needed (maintains aspect ratio, never enlarges)
   if (needsResize) {
     pipeline = pipeline.resize(MAX_DIMENSION, MAX_DIMENSION, {
       fit: 'inside',
@@ -24,8 +26,9 @@ async function compressImage(buffer: Buffer): Promise<Buffer> {
     });
   }
 
-  // Re-encode as PNG (lossless) with maximum compression
-  return pipeline.png({ compressionLevel: 9 }).toBuffer();
+  // Convert to JPEG at quality 85 - 10x compression for photos vs PNG
+  // bria-rmbg accepts JPEG input fine; output is still RGBA PNG with transparency
+  return pipeline.jpeg({ quality: 85 }).toBuffer();
 }
 
 export interface RemoveBackgroundResult {
@@ -48,8 +51,8 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
   try {
     const form = new FormData();
     form.append('file', compressed, {
-      filename: 'image.png',
-      contentType: 'image/png',
+      filename: 'image.jpg',
+      contentType: 'image/jpeg',
     });
 
     const formHeaders = form.getHeaders();
