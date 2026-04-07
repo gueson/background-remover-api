@@ -111,7 +111,7 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
     console.error('Background removal failed:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to process image',
+      error: error.message || 'Failed to process image',
     });
   }
 });

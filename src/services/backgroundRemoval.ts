@@ -25,16 +25,25 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
     const formHeaders = form.getHeaders();
     
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180000); // 3 min timeout
+    const timeout = setTimeout(() => controller.abort(), 600000); // 10 min timeout (bria-rmbg cold start can be slow on CPU)
     
-    const response = await fetch(`${BG_SERVICE_URL}/process`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': formHeaders['content-type'],
-      },
-      body: form.getBuffer(),
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${BG_SERVICE_URL}/process`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': formHeaders['content-type'],
+        },
+        body: form.getBuffer(),
+        signal: controller.signal,
+      });
+    } catch (fetchError: any) {
+      clearTimeout(timeout);
+      if (fetchError.name === 'AbortError') {
+        throw new Error('AI processing timed out after 10 minutes. Please try with a smaller image.');
+      }
+      throw new Error(`Network error: ${fetchError.message}`);
+    }
     
     clearTimeout(timeout);
     
