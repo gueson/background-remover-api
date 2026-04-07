@@ -24,13 +24,19 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
     // Passing FormData directly to fetch() does not reliably set the boundary header.
     const formHeaders = form.getHeaders();
     
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180000); // 3 min timeout
+    
     const response = await fetch(`${BG_SERVICE_URL}/process`, {
       method: 'POST',
       headers: {
         'Content-Type': formHeaders['content-type'],
       },
       body: form.getBuffer(),
+      signal: controller.signal,
     });
+    
+    clearTimeout(timeout);
     
     if (!response.ok) {
       const errorText = await response.text();
