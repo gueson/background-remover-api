@@ -1,5 +1,4 @@
 import FormData from 'form-data';
-import { Readable } from 'stream';
 
 const BG_SERVICE_URL = process.env.BG_SERVICE_URL || 'http://localhost:8000';
 
@@ -16,16 +15,21 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
   
   try {
     const form = new FormData();
-    form.append('file', Readable.from(imageBuffer), {
+    form.append('file', imageBuffer, {
       filename: 'image.png',
-      contentType: 'image/*',
+      contentType: 'image/png',
     });
     
-    // Use native fetch (available in Node.js 18+)
+    // Use getBuffer() + manual Content-Type to ensure boundary is sent correctly.
+    // Passing FormData directly to fetch() does not reliably set the boundary header.
+    const formHeaders = form.getHeaders();
+    
     const response = await fetch(`${BG_SERVICE_URL}/process`, {
       method: 'POST',
-      body: form,
-      // Let FormData set its own headers including the boundary
+      headers: {
+        'Content-Type': formHeaders['content-type'],
+      },
+      body: form.getBuffer(),
     });
     
     if (!response.ok) {
