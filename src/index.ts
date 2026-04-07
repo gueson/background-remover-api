@@ -12,6 +12,7 @@ import paypalRoutes from './routes/paypal.js';
 import userRoutes from './routes/user.js';
 import usageRoutes from './routes/usage.js';
 import apiKeyRoutes from './routes/apiKey.js';
+import quotaRoutes from './routes/quota.js';
 
 // Middleware
 import { errorHandler } from './middleware/errorHandler.js';
@@ -60,6 +61,7 @@ app.use('/api/paypal', paypalRoutes);
 app.use('/api/user', authMiddleware, userRoutes);
 app.use('/api/usage', authMiddleware, usageRoutes);
 app.use('/api/api-keys', authMiddleware, apiKeyRoutes);
+app.use('/api/quota', authMiddleware, quotaRoutes);
 
 // Error handler
 app.use(errorHandler);
