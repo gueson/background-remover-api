@@ -1,6 +1,32 @@
 import FormData from 'form-data';
+import sharp from 'sharp';
 
 const BG_SERVICE_URL = process.env.BG_SERVICE_URL || 'http://localhost:8000';
+
+// Compress image if over 2MB or larger than 2000px on longest side
+const SIZE_THRESHOLD = 2 * 1024 * 1024; // 2MB
+const MAX_DIMENSION = 2000; // px
+
+async function compressImage(buffer: Buffer): Promise<Buffer> {
+  const metadata = await sharp(buffer).metadata();
+  const needsResize = (metadata.width ?? 0) > MAX_DIMENSION || (metadata.height ?? 0) > MAX_DIMENSION;
+  const needsCompress = buffer.length > SIZE_THRESHOLD;
+
+  if (!needsResize && !needsCompress) {
+    return buffer;
+  }
+
+  let pipeline = sharp(buffer);
+  if (needsResize) {
+    pipeline = pipeline.resize(MAX_DIMENSION, MAX_DIMENSION, {
+      fit: 'inside',
+      withoutEnlargement: true,
+    });
+  }
+
+  // Re-encode as PNG (lossless) with maximum compression
+  return pipeline.png({ compressionLevel: 9 }).toBuffer();
+}
 
 export interface RemoveBackgroundResult {
   result_url: string;
@@ -12,21 +38,25 @@ export interface RemoveBackgroundResult {
 
 export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackgroundResult> {
   const startTime = Date.now();
-  
+
+  // Compress image before sending to bg-service to avoid timeout
+  const compressed = await compressImage(imageBuffer);
+  if (compressed.length < imageBuffer.length) {
+    console.log(`[bg-service] Compressed image: ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB → ${(compressed.length / 1024 / 1024).toFixed(2)}MB`);
+  }
+
   try {
     const form = new FormData();
-    form.append('file', imageBuffer, {
+    form.append('file', compressed, {
       filename: 'image.png',
       contentType: 'image/png',
     });
-    
-    // Use getBuffer() + manual Content-Type to ensure boundary is sent correctly.
-    // Passing FormData directly to fetch() does not reliably set the boundary header.
+
     const formHeaders = form.getHeaders();
-    
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 600000); // 10 min timeout (bria-rmbg cold start can be slow on CPU)
-    
+    const timeout = setTimeout(() => controller.abort(), 600000); // 10 min timeout
+
     let response: Response;
     try {
       response = await fetch(`${BG_SERVICE_URL}/process`, {
@@ -44,23 +74,23 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
       }
       throw new Error(`Network error: ${fetchError.message}`);
     }
-    
+
     clearTimeout(timeout);
-    
+
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error(`Background service error: ${response.status} - ${errorText}`);
     }
-    
+
     const result = await response.json() as {
       result_url: string;
       original_size: number;
       result_size: number;
     };
-    
+
     return {
       result_url: result.result_url,
-      original_size: result.original_size,
+      original_size: imageBuffer.length,
       result_size: result.result_size,
       processingTimeMs: Date.now() - startTime,
     };
