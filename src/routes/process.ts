@@ -34,7 +34,7 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
   }
 
   // Check if background service is available
-  if (!isBackgroundServiceAvailable()) {
+  if (!(await isBackgroundServiceAvailable())) {
     res.status(503).json({
       success: false,
       error: 'AI processing service is currently unavailable. Please try again later.',

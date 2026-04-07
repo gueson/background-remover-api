@@ -51,7 +51,16 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
   }
 }
 
-export function isBackgroundServiceAvailable(): boolean {
-  // Simple health check - service URL is configured
-  return !!BG_SERVICE_URL && BG_SERVICE_URL !== 'http://localhost:8000';
+export async function isBackgroundServiceAvailable(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch(`${BG_SERVICE_URL}/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
