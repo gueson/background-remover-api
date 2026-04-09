@@ -32,8 +32,7 @@ async function compressImage(buffer: Buffer): Promise<Buffer> {
 }
 
 export interface RemoveBackgroundResult {
-  result_url: string;
-  result_base64?: string;
+  result_id: string;
   original_size: number;
   result_size: number;
   processingTimeMs: number;
@@ -86,13 +85,13 @@ export async function removeBackground(imageBuffer: Buffer): Promise<RemoveBackg
     }
 
     const result = await response.json() as {
-      result_url: string;
+      result_id: string;
       original_size: number;
       result_size: number;
     };
 
     return {
-      result_url: result.result_url,
+      result_id: result.result_id,
       original_size: imageBuffer.length,
       result_size: result.result_size,
       processingTimeMs: Date.now() - startTime,

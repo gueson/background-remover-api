@@ -93,15 +93,25 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       data: {
         userId,
         imageSize: imageBuffer.length,
-        resultSize: result.result_base64 ? Buffer.from(result.result_base64, 'base64').length : 0,
+        resultSize: result.result_size,
         processingTimeMs: result.processingTimeMs,
       },
     });
 
+    // Fetch result image from bg-service and return as data URL to frontend
+    const bgResponse = await fetch(`${BG_SERVICE_URL}/result/${result.result_id}`);
+    if (!bgResponse.ok) {
+      throw new Error('Failed to retrieve result image');
+    }
+    const arrayBuffer = await bgResponse.arrayBuffer();
+    const resultBuffer = Buffer.from(arrayBuffer);
+    const resultBase64 = resultBuffer.toString('base64');
+    const dataUrl = `data:image/png;base64,${resultBase64}`;
+
     res.json({
       success: true,
       data: {
-        resultUrl: result.result_url,
+        resultUrl: dataUrl,
         originalSize: result.original_size,
         resultSize: result.result_size,
         processingTimeMs: result.processingTimeMs,
